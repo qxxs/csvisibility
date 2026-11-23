@@ -1,18 +1,54 @@
-# CSVisibility
+# Rocket Propulsion Simulator
 
-An open-source data profiling, cleaning and visualisation platform for CSV files.
+A dependency-free command-line simulator for vertical single-stage rocket flight.
 
-**Status:** early development. This README is a starting point and will be expanded with installation instructions, screenshots and API examples as features are built.
+## Run
 
-## Planned features
+Requires Python 3.10 or newer.
 
-- Upload and inspect CSV files
-- Automatic data profiling and an explainable data quality score
-- Data quality issue detection
-- Data cleaning with undo, without ever modifying the original upload
-- Interactive visualisations
-- Export of cleaned data, JSON summaries and reports
+```bash
+python3 rocket_sim.py
+```
 
-## Licence
+Run interactively:
 
-MIT (licence file to be added).
+```bash
+python3 rocket_sim.py --interactive
+```
+
+Run with command-line inputs:
+
+```bash
+python3 rocket_sim.py \
+  --dry-mass 50 \
+  --propellant 100 \
+  --thrust 20000 \
+  --isp 250 \
+  --burn-time 12 \
+  --throttle 100
+```
+
+Compare propulsion levels:
+
+```bash
+python3 rocket_sim.py --compare
+```
+
+## Model
+
+The model performs a one-dimensional vertical simulation with a fixed time step.
+
+- Thrust: `maximum thrust × throttle percentage`
+- Mass flow: `thrust / (specific impulse × standard gravity)`
+- Gravity: `9.80665 m/s²`
+- Drag: optional quadratic atmospheric drag using `Cd`, reference area, sea-level density, and scale height
+- Integration: semi-implicit Euler
+- Ground impact: simulation stops when altitude reaches 0 m after launch
+
+The values are educational estimates, not a substitute for engine design or launch engineering tools.
+
+## Test
+
+```bash
+python3 -m unittest discover -s tests -v
+```
