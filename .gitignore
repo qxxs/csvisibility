@@ -1,0 +1,41 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# ---------- Node / Frontend ----------
+node_modules/
+frontend/dist/
+frontend/coverage/
+npm-debug.log*
+
+# ---------- Secrets and environment files ----------
+.env
+.env.*
+!.env.example
+
+# ---------- User data (never commit uploaded datasets) ----------
+storage/
+uploads/
+*.sqlite3
+
+# ---------- Docker ----------
+docker-compose.override.yml
+
+# ---------- Editors and OS ----------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---------- Logs ----------
+*.log
