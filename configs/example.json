@@ -1,0 +1,15 @@
+{
+  "dry_mass_kg": 50.0,
+  "propellant_mass_kg": 100.0,
+  "thrust_newtons": 20000.0,
+  "specific_impulse_s": 250.0,
+  "burn_time_s": 12.0,
+  "initial_altitude_m": 0.0,
+  "initial_velocity_m_s": 0.0,
+  "drag_coefficient": 0.4,
+  "reference_area_m2": 0.5,
+  "air_density_kg_m3": 1.225,
+  "scale_height_m": 8500.0,
+  "throttle_percent": 100.0,
+  "time_step_s": 0.1
+}

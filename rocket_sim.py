@@ -9,226 +9,32 @@ import argparse
 import math
 import sys
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Iterable
 
-
-G0 = 9.80665
-
-
-@dataclass(frozen=True)
-class RocketConfig:
-    dry_mass_kg: float
-    propellant_mass_kg: float
-    thrust_newtons: float
-    specific_impulse_s: float
-    burn_time_s: float
-    initial_altitude_m: float = 0.0
-    initial_velocity_m_s: float = 0.0
-    drag_coefficient: float = 0.0
-    reference_area_m2: float = 0.0
-    air_density_kg_m3: float = 1.225
-    scale_height_m: float = 8500.0
-    throttle_percent: float = 100.0
-    time_step_s: float = 0.1
-
-
-@dataclass(frozen=True)
-class FlightPoint:
-    time_s: float
-    altitude_m: float
-    velocity_m_s: float
-    acceleration_m_s2: float
-    mass_kg: float
-    thrust_n: float
-    propellant_kg: float
-
-
-@dataclass(frozen=True)
-class FlightResult:
-    status: str
-    flight_time_s: float
-    apogee_m: float
-    max_velocity_m_s: float
-    max_acceleration_m_s2: float
-    impact_velocity_m_s: float
-    final_mass_kg: float
-    burnout_time_s: float
-    burnout_altitude_m: float
-    burnout_velocity_m_s: float
-    propellant_used_kg: float
-    points: tuple[FlightPoint, ...]
-
-
-def validate_config(config: RocketConfig) -> None:
-    positive_fields = {
-        "dry_mass_kg": config.dry_mass_kg,
-        "thrust_newtons": config.thrust_newtons,
-        "specific_impulse_s": config.specific_impulse_s,
-        "burn_time_s": config.burn_time_s,
-        "time_step_s": config.time_step_s,
-    }
-    for name, value in positive_fields.items():
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"{name} must be a finite number greater than zero.")
-    if not math.isfinite(config.propellant_mass_kg) or config.propellant_mass_kg < 0:
-        raise ValueError("propellant_mass_kg must be zero or greater.")
-    if not math.isfinite(config.initial_altitude_m) or config.initial_altitude_m < 0:
-        raise ValueError("initial_altitude_m must be zero or greater.")
-    if not math.isfinite(config.initial_velocity_m_s):
-        raise ValueError("initial_velocity_m_s must be finite.")
-    if not 0 <= config.throttle_percent <= 100:
-        raise ValueError("throttle_percent must be between 0 and 100.")
-    if not math.isfinite(config.drag_coefficient) or config.drag_coefficient < 0:
-        raise ValueError("drag_coefficient must be zero or greater.")
-    if not math.isfinite(config.reference_area_m2) or config.reference_area_m2 < 0:
-        raise ValueError("reference_area_m2 must be zero or greater.")
-    if config.reference_area_m2 > 0 and (
-        not math.isfinite(config.air_density_kg_m3)
-        or config.air_density_kg_m3 < 0
-    ):
-        raise ValueError("air_density_kg_m3 must be zero or greater.")
-    if not math.isfinite(config.scale_height_m) or config.scale_height_m <= 0:
-        raise ValueError("scale_height_m must be greater than zero.")
+from rocket_simulator.models import FlightPoint, FlightResult, RocketConfig
+from rocket_simulator.simulation import G0, simulate, validate_config
+from rocket_simulator.atmosphere import density_at_altitude
+from rocket_simulator.analysis import sensitivity_analysis, monte_carlo
+from rocket_simulator.reporting import (
+    export_result_json,
+    export_trajectory_csv,
+    load_rocket_config,
+    save_rocket_config,
+)
+from rocket_simulator.storage import SimulationHistory
 
 
 def _density_at_altitude(config: RocketConfig, altitude_m: float) -> float:
-    if config.drag_coefficient == 0 or config.reference_area_m2 == 0:
-        return 0.0
-    return config.air_density_kg_m3 * math.exp(
-        -max(0.0, altitude_m) / config.scale_height_m
-    )
-
-
-def simulate(config: RocketConfig, max_flight_time_s: float = 600.0) -> FlightResult:
-    """Simulate vertical flight using a fixed-step semi-implicit Euler method."""
-    validate_config(config)
-    if max_flight_time_s <= 0:
-        raise ValueError("max_flight_time_s must be greater than zero.")
-
-    throttle = config.throttle_percent / 100.0
-    mass = config.dry_mass_kg + config.propellant_mass_kg
-    propellant = config.propellant_mass_kg
-    altitude = config.initial_altitude_m
-    velocity = config.initial_velocity_m_s
-    time = 0.0
-    apogee = altitude
-    max_velocity = velocity
-    max_acceleration = 0.0
-    burnout_time = 0.0
-    burnout_altitude = altitude
-    burnout_velocity = velocity
-    burnout_recorded = False
-    mass_flow = 0.0
-    impact_velocity = velocity
-    status = "coasting"
-    points = [
-        FlightPoint(
-            time_s=0.0,
-            altitude_m=altitude,
-            velocity_m_s=velocity,
-            acceleration_m_s2=0.0,
-            mass_kg=mass,
-            thrust_n=0.0,
-            propellant_kg=propellant,
-        )
-    ]
-
-    while time < max_flight_time_s:
-        thrust = 0.0
-        if time < config.burn_time_s and propellant > 1e-12 and throttle > 0:
-            thrust = config.thrust_newtons * throttle
-            mass_flow = thrust / (config.specific_impulse_s * G0)
-
-        drag_acceleration = 0.0
-        if velocity != 0:
-            density = _density_at_altitude(config, altitude)
-            drag_force = (
-                0.5
-                * density
-                * config.drag_coefficient
-                * config.reference_area_m2
-                * velocity
-                * abs(velocity)
-            )
-            drag_acceleration = drag_force / mass
-
-        acceleration = thrust / mass - G0 - drag_acceleration
-        velocity += acceleration * config.time_step_s
-        altitude += velocity * config.time_step_s
-        time += config.time_step_s
-
-        if thrust > 0:
-            used = min(mass_flow * config.time_step_s, propellant)
-            propellant -= used
-            mass -= used
-        else:
-            mass = config.dry_mass_kg + propellant
-        if propellant < 1e-9:
-            propellant = 0.0
-
-        apogee = max(apogee, altitude)
-        max_velocity = max(max_velocity, velocity)
-        max_acceleration = max(max_acceleration, acceleration)
-
-        if thrust == 0 and not burnout_recorded:
-            burnout_time = time
-            burnout_altitude = altitude
-            burnout_velocity = velocity
-            burnout_recorded = True
-
-        points.append(
-            FlightPoint(
-                time_s=time,
-                altitude_m=altitude,
-                velocity_m_s=velocity,
-                acceleration_m_s2=acceleration,
-                mass_kg=mass,
-                thrust_n=thrust,
-                propellant_kg=propellant,
-            )
-        )
-
-        if altitude <= 0 and time > config.time_step_s:
-            altitude = 0.0
-            impact_velocity = velocity
-            status = "impact"
-            points[-1] = FlightPoint(
-                time_s=time,
-                altitude_m=0.0,
-                velocity_m_s=velocity,
-                acceleration_m_s2=acceleration,
-                mass_kg=mass,
-                thrust_n=thrust,
-                propellant_kg=propellant,
-            )
-            break
-    else:
-        status = "time_limit"
-        impact_velocity = velocity
-
-    if not burnout_recorded:
-        burnout_time = time
-        burnout_altitude = altitude
-        burnout_velocity = velocity
-
-    return FlightResult(
-        status=status,
-        flight_time_s=time,
-        apogee_m=apogee,
-        max_velocity_m_s=max_velocity,
-        max_acceleration_m_s2=max_acceleration,
-        impact_velocity_m_s=impact_velocity,
-        final_mass_kg=mass,
-        burnout_time_s=burnout_time,
-        burnout_altitude_m=burnout_altitude,
-        burnout_velocity_m_s=burnout_velocity,
-        propellant_used_kg=config.propellant_mass_kg - propellant,
-        points=tuple(points),
-    )
+    """Compatibility alias for the original private atmosphere helper."""
+    return density_at_altitude(config, altitude_m)
 
 
 def print_ascii_chart(result: FlightResult, width: int = 68, height: int = 18) -> None:
+    if not isinstance(width, int) or isinstance(width, bool) or width < 2:
+        raise ValueError("chart width must be an integer greater than or equal to 2.")
+    if not isinstance(height, int) or isinstance(height, bool) or height < 1:
+        raise ValueError("chart height must be an integer greater than or equal to 1.")
     points = result.points
     if not points:
         return
@@ -462,19 +268,103 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chart-width", type=int, default=68, help="ASCII chart width.")
     parser.add_argument("--chart-height", type=int, default=18, help="ASCII chart height.")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of human-readable output.")
+    parser.add_argument("--method", choices=("euler", "rk4"), default="euler", help="Numerical integration method.")
+    parser.add_argument("--output-json", metavar="PATH", help="Export a detailed JSON report.")
+    parser.add_argument("--csv", metavar="PATH", help="Export the trajectory as CSV.")
+    parser.add_argument("--save-history", action="store_true", help="Save this simulation to SQLite history.")
+    parser.add_argument("--history", action="store_true", help="List recent simulation history.")
+    parser.add_argument("--history-db", default="data/simulation_history.sqlite3", help="SQLite history database path.")
+    parser.add_argument("--sensitivity", metavar="FIELD", help="Run one-at-a-time sensitivity analysis.")
+    parser.add_argument("--monte-carlo", type=int, metavar="SAMPLES", help="Run Monte Carlo uncertainty analysis.")
+    parser.add_argument("--seed", type=int, default=0, help="Random seed for Monte Carlo analysis.")
+    parser.add_argument("--menu", action="store_true", help="Open the professional interactive main menu.")
+    parser.add_argument("--config", metavar="PATH", help="Load a rocket configuration from JSON.")
+    parser.add_argument("--save-config", metavar="PATH", help="Save the active rocket configuration to JSON.")
     return parser
+
+
+def menu_main() -> int:
+    while True:
+        print("\nROCKET PROPULSION SIMULATOR")
+        print("[1] Launch Simulation")
+        print("[2] Compare Throttle Levels")
+        print("[3] Sensitivity Analysis")
+        print("[4] Monte Carlo Analysis")
+        print("[5] Simulation History")
+        print("[0] Exit")
+        choice = input("Select option: ").strip()
+        if choice == "0":
+            return 0
+        if choice == "1":
+            try:
+                config, replay_speed = interactive_config()
+                validate_config(config)
+                result = simulate(config)
+                animate_flight(config, result, replay_speed, 30)
+                print_result(config, result)
+            except (ValueError, KeyboardInterrupt) as error:
+                print(f"\nError: {error}", file=sys.stderr)
+        elif choice == "2":
+            try:
+                config, _ = interactive_config()
+                for throttle in (25.0, 50.0, 75.0, 100.0):
+                    level_config = RocketConfig(
+                        **{**asdict(config), "throttle_percent": throttle}
+                    )
+                    result = simulate(level_config)
+                    print(
+                        f"{throttle:5.0f}%  apogee {result.apogee_m:12,.1f} m  "
+                        f"max velocity {result.max_velocity_m_s:10,.1f} m/s"
+                    )
+            except (ValueError, KeyboardInterrupt) as error:
+                print(f"\nError: {error}", file=sys.stderr)
+        elif choice in {"3", "4"}:
+            print("Use the corresponding command-line options for batch analysis.")
+        elif choice == "5":
+            with SimulationHistory("data/simulation_history.sqlite3") as history:
+                rows = history.list()
+                if not rows:
+                    print("No saved simulations.")
+                for row in rows:
+                    print(
+                        f"{row['id']:>3}  {row['created_at']}  "
+                        f"{row['rocket_name']}  {row['status']}  "
+                        f"{row['apogee_m']:,.1f} m"
+                    )
+        else:
+            print("Please select a displayed option.")
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if args.history:
+            with SimulationHistory(args.history_db) as history:
+                rows = history.list()
+                if not rows:
+                    print("No saved simulations.")
+                else:
+                    print("ID  Date                 Rocket              Method  Status      Apogee m")
+                    for row in rows:
+                        print(
+                            f"{row['id']:>2}  {row['created_at']}  "
+                            f"{row['rocket_name']:<18} {row['integration_method']:<6} "
+                            f"{row['status']:<10} {row['apogee_m']:,.1f}"
+                        )
+            return 0
+        if args.menu:
+            return menu_main()
         replay_speed = args.playback_speed
         if args.interactive:
             config, replay_speed = interactive_config()
+        elif args.config:
+            config = load_rocket_config(args.config)
         else:
             config = base_config_from_args(args)
         validate_config(config)
+        if args.save_config:
+            save_rocket_config(config, args.save_config)
         if not 0.1 <= replay_speed <= 20:
             raise ValueError("Replay speed multiplier must be between 0.1 and 20.")
         if args.fps < 1 or args.fps > 60:
@@ -486,7 +376,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 level_config = RocketConfig(
                     **{**asdict(config), "throttle_percent": throttle}
                 )
-                result = simulate(level_config, args.max_time)
+                result = simulate(level_config, args.max_time, args.method)
                 if not args.json:
                     print_result(
                         level_config,
@@ -514,7 +404,38 @@ def main(argv: Iterable[str] | None = None) -> int:
                 print(json.dumps(rows, indent=2))
             return 0
 
-        result = simulate(config, args.max_time)
+        if args.sensitivity:
+            rows = sensitivity_analysis(config, args.sensitivity)
+            print("Sensitivity analysis")
+            for row in rows:
+                print(
+                    f"factor {row['factor']:4.2f}  "
+                    f"apogee {row['apogee_m']:12,.1f} m  "
+                    f"max velocity {row['max_velocity_m_s']:10,.1f} m/s"
+                )
+            return 0
+        if args.monte_carlo is not None:
+            results = monte_carlo(config, args.monte_carlo, args.seed)
+            apogees = [result.apogee_m for result in results]
+            velocities = [result.max_velocity_m_s for result in results]
+            print(f"Monte Carlo samples: {len(results)}")
+            print(f"Seed: {args.seed}")
+            print(f"Apogee mean: {sum(apogees) / len(apogees):,.2f} m")
+            print(f"Apogee range: {min(apogees):,.2f} to {max(apogees):,.2f} m")
+            print(
+                f"Maximum velocity range: "
+                f"{min(velocities):,.2f} to {max(velocities):,.2f} m/s"
+            )
+            return 0
+
+        result = simulate(config, args.max_time, args.method)
+        if args.output_json:
+            export_result_json(config, result, args.output_json, args.method)
+        if args.csv:
+            export_trajectory_csv(result, args.csv)
+        if args.save_history:
+            with SimulationHistory(args.history_db) as history:
+                history.add(config, result, args.method)
         if args.json:
             import json
             print(json.dumps({
