@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from rocket_sim import G0, RocketConfig, simulate
+from rocket_sim import G0, RocketConfig, animate_flight, select_animation_frames, simulate
 
 
 class RocketSimulationTests(unittest.TestCase):
@@ -58,6 +58,27 @@ class RocketSimulationTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             simulate(config)
+
+    def test_animation_frames_are_bounded_and_includes_ending(self):
+        config = RocketConfig(
+            dry_mass_kg=50,
+            propellant_mass_kg=100,
+            thrust_newtons=20_000,
+            specific_impulse_s=250,
+            burn_time_s=12,
+            throttle_percent=100,
+            time_step_s=0.1,
+        )
+        result = simulate(config)
+        frames = select_animation_frames(
+            result,
+            target_fps=30,
+            playback_speed=1,
+            max_frames=900,
+        )
+        self.assertGreater(len(frames), 1)
+        self.assertLessEqual(len(frames), 900)
+        self.assertEqual(frames[-1].time_s, result.points[-1].time_s)
 
 
 if __name__ == "__main__":

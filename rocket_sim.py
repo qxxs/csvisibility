@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import time
 from dataclasses import asdict, dataclass
 from typing import Iterable
 
@@ -251,6 +252,93 @@ def print_ascii_chart(result: FlightResult, width: int = 68, height: int = 18) -
     print("          0" + " " * max(0, width - 12) + f"{result.flight_time_s:.1f} s")
 
 
+def select_animation_frames(
+    result: FlightResult,
+    target_fps: int = 30,
+    playback_speed: float = 1.0,
+    max_frames: int = 900,
+) -> list[FlightPoint]:
+    """Select evenly spaced flight points for a bounded terminal replay."""
+    if not result.points:
+        return []
+    if playback_speed <= 0:
+        playback_speed = 1.0
+
+    estimated_frames = max(
+        2,
+        round(result.flight_time_s * target_fps * playback_speed),
+    )
+    frame_count = min(estimated_frames, max_frames)
+    if frame_count >= len(result.points):
+        return list(result.points)
+
+    return [
+        result.points[
+            min(
+                len(result.points) - 1,
+                round(index * (len(result.points) - 1) / (frame_count - 1)),
+            )
+        ]
+        for index in range(frame_count)
+    ]
+
+
+def animate_flight(
+    config: RocketConfig,
+    result: FlightResult,
+    playback_speed: float = 1.0,
+    target_fps: int = 30,
+) -> None:
+    """Replay a trajectory with a visible rocket and live propulsion readouts."""
+    frames = select_animation_frames(result, target_fps, playback_speed)
+    if not frames:
+        return
+
+    maximum = max(result.apogee_m, config.initial_altitude_m, 1.0)
+    chart_height = 16
+    frame_delay = 1.0 / target_fps
+    print("\033[2J\033[H")
+
+    for frame in frames:
+        position = int(round(frame.altitude_m / maximum * (chart_height - 1)))
+        position = max(0, min(chart_height - 1, position))
+        lines = []
+        for row in range(chart_height - 1, -1, -1):
+            if row == position:
+                flame = ""
+                if frame.thrust_n > 0:
+                    flame_level = min(3, max(1, round(config.throttle_percent / 34)))
+                    flame = "  " + ("!" * flame_level)
+                lines.append(f"{row * maximum / (chart_height - 1):9,.0f} m │        /\\{flame}")
+                lines.append("          │       <🚀>")
+            else:
+                lines.append(f"{row * maximum / (chart_height - 1):9,.0f} m │")
+
+        thrust_percent = (
+            frame.thrust_n / config.thrust_newtons * 100
+            if config.thrust_newtons
+            else 0
+        )
+        state = "POWERED" if frame.thrust_n > 0 else "COASTING"
+        print("\033[2J\033[H", end="")
+        print(f"ROCKET FLIGHT  |  {state}  |  {playback_speed:g}x playback")
+        print("\n".join(lines))
+        print("          └────────────────────────────────")
+        print(
+            f"Time {frame.time_s:7.1f} s   "
+            f"Altitude {frame.altitude_m:10,.1f} m   "
+            f"Velocity {frame.velocity_m_s:9,.1f} m/s"
+        )
+        print(
+            f"Thrust {frame.thrust_n:10,.0f} N ({thrust_percent:5.1f}%)   "
+            f"Accel {frame.acceleration_m_s2:8,.2f} m/s²   "
+            f"Propellant {frame.propellant_kg:7,.2f} kg"
+        )
+        time.sleep(frame_delay)
+
+    print("\nFlight replay complete.")
+
+
 def print_result(
     config: RocketConfig,
     result: FlightResult,
@@ -290,7 +378,7 @@ def prompt_float(prompt: str, default: float) -> float:
         print("Please enter a finite number.")
 
 
-def interactive_config() -> RocketConfig:
+def interactive_config() -> tuple[RocketConfig, float]:
     print("\nRocket Propulsion Simulator")
     print("Enter values or press Enter to accept the suggested default.\n")
     dry_mass = prompt_float("Dry mass (kg)", 50.0)
@@ -304,6 +392,9 @@ def interactive_config() -> RocketConfig:
     area = prompt_float("Reference area (m²)", 0.0)
     throttle = prompt_float("Throttle level (%)", 100.0)
     step = prompt_float("Simulation time step (s)", 0.1)
+    replay_speed = prompt_float("Replay speed multiplier", 1.0)
+    if replay_speed < 0.1 or replay_speed > 20:
+        raise ValueError("Replay speed multiplier must be between 0.1 and 20.")
 
     config = RocketConfig(
         dry_mass_kg=dry_mass,
@@ -323,7 +414,7 @@ def interactive_config() -> RocketConfig:
     except ValueError as error:
         print(f"\nInvalid configuration: {error}", file=sys.stderr)
         raise
-    return config
+    return config, replay_speed
 
 
 def base_config_from_args(args: argparse.Namespace) -> RocketConfig:
@@ -349,6 +440,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="Simulate a vertical single-stage rocket flight."
     )
     parser.add_argument("--interactive", action="store_true", help="Prompt for each input.")
+    parser.add_argument("--animate", action="store_true", help="Replay the flight in the terminal.")
+    parser.add_argument("--no-animation", action="store_true", help="Skip the terminal flight replay.")
+    parser.add_argument("--playback-speed", type=float, default=1.0, help="Replay speed multiplier (0.1 to 20).")
+    parser.add_argument("--fps", type=int, default=30, help="Terminal replay frames per second.")
     parser.add_argument("--compare", action="store_true", help="Compare 25%%, 50%%, 75%%, and 100%% throttle.")
     parser.add_argument("--dry-mass", type=float, default=50.0, help="Dry mass in kg.")
     parser.add_argument("--propellant", type=float, default=100.0, help="Propellant mass in kg.")
@@ -374,12 +469,16 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        config = (
-            interactive_config()
-            if args.interactive
-            else base_config_from_args(args)
-        )
+        replay_speed = args.playback_speed
+        if args.interactive:
+            config, replay_speed = interactive_config()
+        else:
+            config = base_config_from_args(args)
         validate_config(config)
+        if not 0.1 <= replay_speed <= 20:
+            raise ValueError("Replay speed multiplier must be between 0.1 and 20.")
+        if args.fps < 1 or args.fps > 60:
+            raise ValueError("fps must be between 1 and 60.")
         if args.compare:
             throttle_levels = (25.0, 50.0, 75.0, 100.0)
             rows = []
@@ -395,6 +494,13 @@ def main(argv: Iterable[str] | None = None) -> int:
                         args.chart_width,
                         args.chart_height,
                     )
+                    if args.animate:
+                        animate_flight(
+                            level_config,
+                            result,
+                            replay_speed,
+                            args.fps,
+                        )
                 rows.append({
                     "throttle_percent": throttle,
                     "flight_time_s": result.flight_time_s,
@@ -420,6 +526,13 @@ def main(argv: Iterable[str] | None = None) -> int:
                 },
             }, indent=2))
         else:
+            should_animate = (
+                not args.no_animation
+                and (args.animate or args.interactive)
+                and not args.json
+            )
+            if should_animate:
+                animate_flight(config, result, replay_speed, args.fps)
             print_result(config, result, args.chart_width, args.chart_height)
         return 0
     except (ValueError, KeyboardInterrupt) as error:
